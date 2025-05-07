@@ -33,3 +33,5 @@ Visit the live demo here: [https://yapweijun1996.github.io/Singapore-Traffic-Cam
 
 This project is for educational/demonstration use only.
 
+## Preview
+![image](https://github.com/user-attachments/assets/5342061a-aadf-429c-81ef-dc94745f2d6e)
