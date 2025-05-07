@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Traffic Cameras with Viewer.js</title>
+
+<!-- Bootstrap CSS -->
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+<!-- Leaflet.markercluster CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+
+<!-- Viewer.js CSS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/viewerjs/dist/viewer.min.css" />
+
+<style>
+body {
+  background-color: #f0f2f5;
+  transition: background-color 0.3s;
+}
+body.dark {
+  background-color: #222;
+  color: #eee;
+}
+#loader {
+  display: none;
+  position: fixed;
+  top: 50%; left:50%;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+}
+#map { height: 400px; }
+
+.leaflet-popup-content img {
+  max-width: 200px; height: auto; cursor: pointer; margin-top:5px;
+}
+</style>
+</head>
+<body>
+
+<div class="container my-4">
+
+<h1 class="text-center mb-3">Traffic Cameras with Viewer.js</h1>
+<div class="d-flex flex-wrap align-items-center justify-content-center mb-3 gap-2">
+  <input type="text" id="searchInput" class="form-control" placeholder="Search Camera ID or Location" />
+  <button class="btn btn-primary" id="filterBtn">Filter</button>
+  <button class="btn btn-secondary" id="resetBtn">Reset</button>
+  <button class="btn btn-outline-secondary" id="darkModeToggle">Dark Mode</button>
+</div>
+
+<div class="text-center mb-3">
+  <button class="btn btn-success" id="refreshBtn">Refresh Data</button>
+</div>
+
+<div id="loader" class="spinner-border text-primary" role="status">
+  <span class="visually-hidden">Loading...</span>
+</div>
+
+<h4 class="mb-3 text-center">Map of Cameras</h4>
+<div id="map" class="mb-4"></div>
+
+<h4 class="mb-3 text-center">Traffic Camera Thumbnails</h4>
+<div class="row g-3" id="imagesContainer"></div>
+
+</div>
+
+<!-- Modal for Viewer.js with extended info -->
+<div class="modal fade" id="imageViewerModal" tabindex="-1" aria-labelledby="imageViewerLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg" style="max-width: 90vw;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="imageViewerLabel">Zoom & Rotate Image</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body p-3">
+        <div id="imageInfo" class="mb-2"><em>Loading info...</em></div>
+        <img id="viewerImage" src="" style="width:100%; max-height:80vh; object-fit:contain;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/viewerjs/dist/viewer.min.js"></script>
+
+<script>
+// --- VARIABLES ---
+const apiUrl = 'https://api.data.gov.sg/v1/transport/traffic-images';
+
+let map, markerClusterGroup;
+let allCameras = [], filteredCameras = [];
+let viewerInstance = null; // for Viewer.js
+const viewerModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('imageViewerModal'));
+
+// Initialize Map
+async function initMap() {
+  if (map) return;
+  map = L.map('map').setView([1.3521, 103.8198], 11);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+  markerClusterGroup = L.markerClusterGroup();
+  map.addLayer(markerClusterGroup);
+}
+
+// Fetch Data
+async function fetchData() {
+  document.getElementById('loader').style.display = 'block';
+  document.getElementById('imagesContainer').innerHTML = '';
+  await initMap();
+  markerClusterGroup.clearLayers();
+
+  try {
+    const res = await fetch(apiUrl);
+    const data = await res.json();
+    processData(data.items);
+    fitMapToMarkers();
+  } catch(e) {
+    alert('Failed to load data.');
+    console.error(e);
+  } finally {
+    document.getElementById('loader').style.display = 'none';
+  }
+}
+
+function fitMapToMarkers() {
+  const layers = markerClusterGroup.getLayers();
+  if (layers.length > 0) {
+    const group = new L.featureGroup(layers);
+    map.fitBounds(group.getBounds().pad(0.2));
+  }
+}
+
+function processData(items) {
+  allCameras = [];
+  items.forEach(it => {
+    it.cameras.forEach(cam => {
+      if (cam.location && cam.location.latitude != null && cam.location.longitude != null) {
+        allCameras.push({ ...cam, timestamp: it.timestamp });
+      }
+    });
+  });
+  filteredCameras = [...allCameras];
+  displayData();
+}
+
+function displayData() {
+  document.querySelector('#imagesContainer').innerHTML = '';
+  markerClusterGroup.clearLayers();
+
+  allCameras.forEach(cam => {
+    const lat = cam.location?.latitude;
+    const lng = cam.location?.longitude;
+    if (lat == null || lng == null) return; // skip invalid data
+
+    const marker = L.marker([lat, lng]).on('click', () => {
+      openViewer(cam);
+    });
+
+    // Popup with less info; clicking triggers viewer
+    const popupHtml = `
+      <b>Camera ID:</b> ${cam.camera_id}<br>
+      <img src="${cam.image}" style="width:200px; height:auto; cursor:pointer;" class="popup-img"/>
+    `;
+    marker.bindPopup(popupHtml);
+    marker.on('popupopen', () => {
+      const el = marker.getPopup().getElement();
+      el.querySelector('.popup-img').onclick = () => { openViewer(cam); };
+    });
+    marker.addTo(markerClusterGroup);
+
+    // Add to list
+    const col = document.createElement('div');
+    col.className = 'col-12 col-md-6 col-xl-4';
+    const card = document.createElement('div');
+    card.className = 'card h-100 shadow-sm';
+
+    const img = document.createElement('img');
+    img.src = cam.image;
+    img.className = 'card-img-top p-2';
+    img.alt = 'Traffic Camera';
+    img.style.cursor = 'pointer';
+    img.onclick = () => { openViewer(cam); };
+
+    const body = document.createElement('div');
+    body.className = 'card-body';
+    const dateStr = new Date(cam.timestamp).toLocaleString();
+    body.innerHTML = `
+      <h6 class="card-title">Camera ID: ${cam.camera_id}</h6>
+      <p class="mb-0">
+        <strong>Lat:</strong> ${lat.toFixed(4)}<br>
+        <strong>Lng:</strong> ${lng.toFixed(4)}<br>
+        <strong>Time:</strong> ${dateStr}
+      </p>
+    `;
+    card.appendChild(img);
+    card.appendChild(body);
+    col.appendChild(card);
+    document.getElementById('imagesContainer').appendChild(col);
+  });
+}
+
+// Show viewer modal with image and info
+function openViewer(cam) {
+  const modalEl = document.getElementById('imageViewerModal');
+  const modalTitle = document.querySelector('#imageViewerLabel');
+  const imageEl = document.getElementById('viewerImage');
+  const infoDiv = document.getElementById('imageInfo');
+
+  // Set image src
+  imageEl.src = cam.image;
+
+  // Set info text (more data added here)
+  infoDiv.innerHTML = `
+    <strong>Camera ID:</strong> ${cam.camera_id}<br>
+    <strong>Timestamp:</strong> ${new Date(cam.timestamp).toLocaleString()}<br>
+    <strong>Location:</strong> (${cam.location.latitude.toFixed(4)}, ${cam.location.longitude.toFixed(4)})
+  `;
+
+  // Destroy previous viewer if any
+  if (viewerInstance) {
+    viewerInstance.destroy();
+  }
+  // instantiate viewer
+  viewerInstance = new Viewer(imageEl, {
+    toolbar: {
+      zoomIn: true,
+      zoomOut: true,
+      rotateLeft: true,
+      rotateRight: true,
+      flipVertical: true,
+      flipHorizontal: true,
+      zoom: true,
+      oneToOne: true,
+      reset: true,
+      fullscreen: true,
+    },
+    hidden: true,
+    navbar: false,
+  });
+  // Show modal
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+  viewerInstance.show();
+}
+
+// Setup filter and reset
+function setupFiltering() {
+  document.getElementById('filterBtn').onclick = () => {
+    const q = document.getElementById('searchInput').value.toLowerCase();
+    filteredCameras = allCameras.filter(c =>
+      c.camera_id.toLowerCase().includes(q) ||
+      `(${c.location.latitude.toFixed(4)}, ${c.location.longitude.toFixed(4)})`.toLowerCase().includes(q)
+    );
+    displayData();
+  };
+  document.getElementById('resetBtn').onclick = () => {
+    document.getElementById('searchInput').value = '';
+    filteredCameras = [...allCameras];
+    displayData();
+  };
+}
+
+// Initialize page
+(async () => {
+  await fetchData();
+  setupFiltering();
+})();
+</script>
+
+</body>
+</html>
